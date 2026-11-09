@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import importlib
 import json
 import math
 import os
@@ -55,8 +56,18 @@ def validate_spec(value):
     text(meta.get("title", ""), "Project title", 100)
     if meta.get("fps", 30) not in (24, 30):
         raise SpecError("Frame rate: choose 24 or 30 fps.")
-    if "resolution" in meta and meta["resolution"] != {"width": 1920, "height": 1080}:
-        raise SpecError("Resolution: Studio supports 1920 × 1080 only.")
+    composition = importlib.import_module(
+        "src.composition" if __package__ else "composition"
+    )
+    resolution = meta.get("resolution", {"width": 1920, "height": 1080})
+    object_fields(resolution, ("width", "height"), "Resolution")
+    if any(type(resolution.get(key)) is not int for key in ("width", "height")):
+        raise SpecError("Resolution dimensions must be whole numbers.")
+    if (
+        resolution.get("width"),
+        resolution.get("height"),
+    ) not in composition.RESOLUTIONS:
+        raise SpecError("Choose a supported landscape, portrait or square resolution.")
     theme = spec.setdefault("theme", {})
     object_fields(
         theme, ("preset", "bg", "fg", "accent", "font_size", "title_font_size"), "Theme"
@@ -88,6 +99,7 @@ def validate_spec(value):
         "outro": ("text",),
         "bullets": ("heading", "items", "stagger", "narration_per_bullet"),
         "chart": ("heading", "chart_type", "labels", "values", "y_label"),
+        "composition": ("name", "elements", "background"),
     }
     for index, scene in enumerate(scenes, 1):
         where = f"Scene {index}"
@@ -100,10 +112,17 @@ def validate_spec(value):
                 f"{where}: choose title, bullets, chart or outro. Image scenes are CLI-only."
             )
         kind = scene["type"]
+        if kind == "composition":
+            try:
+                composition.validate_composition(scene, text, number, object_fields)
+            except ValueError as error:
+                raise SpecError(f"{where}: {error}") from error
         object_fields(scene, common + fields[kind], where)
         for key in ("text", "subtitle", "heading", "y_label", "narration"):
             if key in scene:
-                text(scene[key], f"{where} {key}", 1200 if key == "narration" else 300)
+                text(scene[key], f"{where} {key}", (7205 if kind == "composition" else 1200) if key == "narration" else 300)
+                if key != "narration":
+                    composition.check_glyphs(scene[key], f"{where} {key}")
         if kind in ("title", "outro") and not scene.get("text", "").strip():
             raise SpecError(f"{where}: add some text.")
         if scene.get("anim", "fade") not in ("fade", "slide-up", "zoom-in"):
@@ -116,6 +135,7 @@ def validate_spec(value):
                 raise SpecError(f"{where}: add between 1 and 6 bullets.")
             for item in items:
                 text(item, f"{where} bullet", 180)
+                composition.check_glyphs(item, f"{where} bullet")
                 if not item.strip():
                     raise SpecError(f"{where}: bullets cannot be empty.")
             number(scene.get("stagger", 0.4), f"{where} stagger", 0, 2)
@@ -140,6 +160,7 @@ def validate_spec(value):
                 )
             for label in labels:
                 text(label, f"{where} label", 40)
+                composition.check_glyphs(label, f"{where} label")
             for item in values:
                 number(item, f"{where} chart value", -1000000, 1000000)
             scene.setdefault("chart_type", "bar")
