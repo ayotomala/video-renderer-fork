@@ -34,6 +34,7 @@ const initial = {
 let project = structuredClone(initial);
 let selected = 0;
 let token = "";
+
 let rendering = false;
 let downloads = [];
 const names = {
@@ -41,6 +42,7 @@ const names = {
 	bullets: "Bullets",
 	chart: "Chart",
 	outro: "Outro",
+	composition: "Canvas",
 };
 const symbols = { title: "T", bullets: "≡", chart: "▥", outro: "↗" };
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -55,7 +57,7 @@ function applyAppearance(appearance) {
 	$("ui-theme").setAttribute("aria-label", label);
 	$("ui-theme").setAttribute("aria-pressed", String(dark));
 	$("ui-theme").title = label;
-	$("theme-icon").textContent = dark ? "☀" : "☾";
+	$("theme-icon").replaceChildren(icon(dark ? "sun" : "moon"));
 }
 function restoreAppearance() {
 	let appearance = matchMedia("(prefers-color-scheme: dark)").matches
@@ -120,7 +122,7 @@ async function toggleAppearance() {
 		themeTransition = null;
 	}
 }
-restoreAppearance();
+
 $("ui-theme").onclick = toggleAppearance;
 reducedMotion.addEventListener("change", () => {
 	if (reducedMotion.matches) themeTransition?.skipTransition();
@@ -135,6 +137,15 @@ function element(tag, text, className) {
 function notice(message) {
 	$("notice").textContent = message;
 	$("notice").hidden = !message;
+	if (message && $("composer").hidden) $("notice").focus();
+}
+function announce(message) {
+	$("editor-announcement").textContent = message;
+}
+function renderLabel() {
+	return $("output-format").value === "pptx"
+		? "Export PowerPoint"
+		: "Render project";
 }
 function seconds() {
 	return project.timeline.reduce(
@@ -143,6 +154,7 @@ function seconds() {
 	);
 }
 function save() {
+	if (typeof refreshSceneThumbnails === "function") refreshSceneThumbnails();
 	try {
 		localStorage.setItem("frame-project-v1", JSON.stringify(project));
 	} catch {
@@ -156,37 +168,68 @@ function update() {
 	drawMeta();
 }
 function drawMeta() {
-	$("project-stats").textContent =
-		`${project.timeline.length} scenes · ${seconds()} seconds`;
-	$("scene-count").textContent = String(project.timeline.length).padStart(
-		2,
-		"0",
-	);
 	$("add").disabled = project.timeline.length >= 12;
-	$("up").disabled = selected === 0;
-	$("down").disabled = selected === project.timeline.length - 1;
-	$("delete").disabled = project.timeline.length === 1;
+}
+let draggedScene = null;
+function reorderScenes(from, to) {
+	if (from === to) return;
+	finishInlineEditing();
+	const active = project.timeline[selected];
+	const [scene] = project.timeline.splice(from, 1);
+	project.timeline.splice(to, 0, scene);
+	selected = project.timeline.indexOf(active);
+	update();
+	drawEditor();
+	const buttons = $("scenes").querySelectorAll(".scene-button");
+	buttons[to]?.focus();
+	animateSceneArrival(true);
+	announce(`Scene moved to position ${to + 1}.`);
+}
+function deleteScene(index) {
+	if (project.timeline.length === 1) {
+		announce("Keep at least one scene.");
+		return;
+	}
+	finishInlineEditing();
+	project.timeline.splice(index, 1);
+	selected = Math.min(index, project.timeline.length - 1);
+	selectedElement = null;
+	update();
+	drawEditor();
+	$("scenes").querySelectorAll(".scene-button")[selected]?.focus();
+	announce("Scene deleted.");
 }
 function choose(index) {
+	const changed = selected !== index;
+	finishInlineEditing();
+	const snapshot = changed ? captureSceneTransition() : null;
 	const source = document.activeElement?.closest("#scenes")?.id;
 	selected = index;
 	drawScenes();
 	drawCanvas();
 	drawEditor();
 	drawMeta();
+	announce(
+		`Scene ${index + 1}, ${names[project.timeline[index].type]}, selected.`,
+	);
 	if (source) {
-		const buttons = $(source).querySelectorAll("button");
+		const buttons = $(source).querySelectorAll(".scene-button");
 		buttons[index]?.focus({ preventScroll: true });
 	}
+	if (changed) crossfadeScene(snapshot);
 }
 function sceneLabel(scene) {
-	return scene.text || scene.heading || names[scene.type] || "Scene";
+	return (
+		scene.name || scene.text || scene.heading || names[scene.type] || "Scene"
+	);
 }
 function drawScenes() {
+ closeSceneMenus(false);
 	$("scenes").replaceChildren();
 	project.timeline.forEach((scene, index) => {
 		const button = element("button", undefined, "scene-button");
 		button.type = "button";
+		button.draggable = true;
 		button.setAttribute("aria-current", String(index === selected));
 		button.title = `Select scene ${index + 1}`;
 		const text = element("span", undefined, "scene-text");
@@ -199,16 +242,77 @@ function drawScenes() {
 		);
 		button.append(
 			element("span", String(index + 1).padStart(2, "0"), "scene-number"),
-			element("span", symbols[scene.type] || "?", "mini-frame"),
+			element("span", undefined, "mini-frame"),
 			text,
 		);
+		renderSceneThumbnail(button.querySelector(".mini-frame"), scene);
 		button.onclick = () => choose(index);
+ button.oncontextmenu=event=>{event.preventDefault();showSceneOptions(project.timeline[index],event.clientX,event.clientY);};
+		button.ondragstart = (event) => {
+			draggedScene = index;
+			event.dataTransfer.effectAllowed = "move";
+			event.dataTransfer.setData("text/plain", String(index));
+			button.classList.add("dragging-scene");
+		};
+		button.ondragend = () => {
+			draggedScene = null;
+			document
+				.querySelectorAll(".drop-target,.dragging-scene")
+				.forEach((n) => n.classList.remove("drop-target", "dragging-scene"));
+		};
+		button.ondragover = (event) => {
+			if (draggedScene === null) return;
+			event.preventDefault();
+			event.dataTransfer.dropEffect = "move";
+			button.classList.add("drop-target");
+		};
+		button.ondragleave = () => button.classList.remove("drop-target");
+		button.ondrop = (event) => {
+			event.preventDefault();
+			if (draggedScene !== null) {
+				const from = draggedScene;
+				draggedScene = null;
+				reorderScenes(from, index);
+			}
+		};
+		button.onkeydown = (event) => {
+ if(event.key==='ContextMenu' || (event.shiftKey && event.key==='F10')){event.preventDefault();showSceneOptions(project.timeline[index]);return;}
+			if (event.key === "Backspace" || event.key === "Delete") {
+				event.preventDefault();
+				deleteScene(index);
+				return;
+			}
+			if (
+				event.altKey &&
+				["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)
+			) {
+				event.preventDefault();
+				const offset = ["ArrowUp", "ArrowLeft"].includes(event.key) ? -1 : 1;
+				reorderScenes(
+					index,
+					Math.max(0, Math.min(project.timeline.length - 1, index + offset)),
+				);
+				return;
+			}
+			let target = index;
+			if (event.key === "ArrowDown" || event.key === "ArrowRight")
+				target = Math.min(index + 1, project.timeline.length - 1);
+			else if (event.key === "ArrowUp" || event.key === "ArrowLeft")
+				target = Math.max(index - 1, 0);
+			else if (event.key === "Home") target = 0;
+			else if (event.key === "End") target = project.timeline.length - 1;
+			else return;
+			event.preventDefault();
+			choose(target);
+		};
 		const li = element("li");
 		li.append(button);
+ const options=element('button',undefined,'scene-more button');options.type='button';options.setAttribute('aria-label',`Options for scene ${index+1}`);options.append(icon('more'));options.onclick=()=>showSceneOptions(project.timeline[index]);li.append(options);
 		$("scenes").append(li);
 	});
+	syncSelectionHighlights();
 }
-function drawCanvas() {
+function drawLegacyCanvas() {
 	const scene = project.timeline[selected];
 	const theme = project.theme || {};
 	const dark = theme.preset !== "light";
@@ -275,172 +379,23 @@ function drawCanvas() {
 			element("p", "This scene is available in the CLI, not Studio."),
 		);
 	canvas.append(content);
-	$("preview-name").textContent =
-		`Scene ${String(selected + 1).padStart(2, "0")} · ${names[scene.type] || scene.type}`;
-}
-function field(label, key, options = {}) {
-	const wrapper = element("div");
-	const id = `field-${key}`;
-	const caption = element("label", label);
-	caption.htmlFor = id;
-	const control = element(
-		options.multiline ? "textarea" : options.choices ? "select" : "input",
-	);
-	control.id = id;
-	if (options.choices)
-		options.choices.forEach((value) => {
-			const option = element("option", value);
-			option.value = value;
-			control.append(option);
-		});
-	if (!options.multiline && !options.choices)
-		control.type = options.number ? "number" : "text";
-	if (options.number) {
-		control.min = "1";
-		control.max = "15";
-		control.step = "0.5";
-	}
-	if (!options.number && !options.choices)
-		control.maxLength = options.array ? 1200 : key === "narration" ? 1200 : 300;
-	const scene = project.timeline[selected];
-	control.value = options.array
-		? (scene[key] || []).join("\n")
-		: (scene[key] ?? options.default ?? "");
-	control.oninput = () => {
-		scene[key] = options.array
-			? control.value.split("\n")
-			: options.number
-				? Number(control.value)
-				: control.value;
-		if (key === "values")
-			scene[key] = control.value
-				.split("\n")
-				.map((v) => (v.trim() === "" ? null : Number(v)));
-		update();
-	};
-	wrapper.append(caption, control);
-	if (options.hint) {
-		const hint = element("p", options.hint, "field-hint");
-		hint.id = `${id}-hint`;
-		control.setAttribute("aria-describedby", hint.id);
-		wrapper.append(hint);
-	}
-	$("scene-form").append(wrapper);
 }
 function drawEditor() {
-	const scene = project.timeline[selected];
-	$("scene-form").replaceChildren();
-	$("editor-index").textContent =
-		`SCENE ${String(selected + 1).padStart(2, "0")}`;
-	$("editor-kind").textContent = names[scene.type] || "Unsupported scene";
-	if (scene.type === "title" || scene.type === "outro")
-		field("Main text", "text", { multiline: true });
-	if (scene.type === "title") field("Supporting line", "subtitle");
-	if (scene.type === "bullets" || scene.type === "chart")
-		field("Heading", "heading");
-	if (scene.type === "bullets")
-		field("Bullet points", "items", {
-			multiline: true,
-			array: true,
-			hint: "One idea per line. Up to 6 bullets; keep each one short.",
-		});
-	if (scene.type === "chart") {
-		field("Chart style", "chart_type", {
-			choices: ["bar", "line", "pie"],
-			default: "bar",
-		});
-		field("Labels", "labels", {
-			multiline: true,
-			array: true,
-			hint: "One label per line, up to 8.",
-		});
-		field("Values", "values", {
-			multiline: true,
-			array: true,
-			hint: "One number per line, in the same order as labels.",
-		});
-	}
-	field("On-screen duration · seconds", "duration", {
-		number: true,
-		default: 4,
-		hint: "1–15 seconds per scene. Project maximum: 60 seconds.",
-	});
-	field("Narration notes", "narration", {
-		multiline: true,
-		hint: "Saved in JSON for the CLI. Studio exports are silent and use your explicit duration.",
-	});
-	$("preset").value = project.theme?.preset || "dark";
-	$("accent").value = /^#[0-9a-f]{6}$/i.test(project.theme?.accent)
-		? project.theme.accent
-		: "#bba5ff";
-	$("accent-value").textContent = $("accent").value.toUpperCase();
+	syncCanvasTools();
 }
-function move(offset) {
-	const destination = selected + offset;
-	if (destination < 0 || destination >= project.timeline.length) return;
-	const [scene] = project.timeline.splice(selected, 1);
-	project.timeline.splice(destination, 0, scene);
-	selected = destination;
-	update();
-	drawEditor();
-}
-$("up").onclick = () => move(-1);
-$("down").onclick = () => move(1);
-$("delete").onclick = () => {
-	if (project.timeline.length < 2) return;
-	project.timeline.splice(selected, 1);
-	selected = Math.min(selected, project.timeline.length - 1);
-	update();
-	drawEditor();
-	$("editor").focus();
-};
-$("add").onclick = () => {
+function addScene(type) {
 	if (project.timeline.length >= 12) return;
-	const type = $("new-type").value;
-	const scene =
-		type === "bullets"
-			? { type, heading: "A fresh idea", items: ["Your first point"] }
-			: type === "chart"
-				? {
-						type,
-						heading: "A new perspective",
-						chart_type: "bar",
-						labels: ["One", "Two", "Three"],
-						values: [20, 40, 60],
-					}
-				: {
-						type,
-						text:
-							type === "title"
-								? "Your story starts here"
-								: "Thanks for watching",
-					};
-	scene.duration = 4;
-	project.timeline.push(scene);
+	project.timeline.push(canvasTemplate(type));
 	selected = project.timeline.length - 1;
 	update();
 	drawEditor();
-	$("field-heading")?.focus();
-	$("field-text")?.focus();
-};
+	$("editor").focus();
+	animateSceneArrival(true);
+	announce("Canvas scene added.");
+}
 $("project-title").oninput = () => {
 	project.meta = { ...project.meta, title: $("project-title").value };
 	save();
-};
-$("preset").onchange = () => {
-	const dark = $("preset").value === "dark";
-	project.theme = {
-		...project.theme,
-		preset: $("preset").value,
-		bg: dark ? "#191925" : "#faf9fd",
-		fg: dark ? "#f5f0ff" : "#24212d",
-	};
-	update();
-};
-$("accent").oninput = () => {
-	project.theme = { ...project.theme, accent: $("accent").value };
-	$("accent-value").textContent = $("accent").value.toUpperCase();
-	update();
 };
 function download(blob, name) {
 	const url = URL.createObjectURL(blob);
@@ -478,6 +433,50 @@ function checkImport(value) {
 			"Import a JSON project with 1–12 scenes and text-based project settings.",
 		);
 	for (const scene of value.timeline) {
+		if (!object(scene)) throw new Error("Scenes must be objects.");
+		if (scene.type === "composition") {
+			if (
+				!Array.isArray(scene.elements) ||
+				scene.elements.length > 16 ||
+				(scene.background !== undefined &&
+					(!object(scene.background) ||
+						!stringFields(scene.background, [
+							"style",
+							"color",
+							"accent",
+							"motion",
+						])))
+			)
+				throw new Error("Invalid canvas elements or background.");
+			for (const item of scene.elements) {
+				if (
+					!object(item) ||
+					!["text", "chart", "shape"].includes(item.type) ||
+					typeof item.id !== "string" ||
+					typeof item.color !== "string" ||
+					!["x", "y", "w", "h"].every(
+						(k) => typeof item[k] === "number" && Number.isFinite(item[k]),
+					)
+				)
+					throw new Error("Invalid canvas geometry.");
+				if (
+					item.type === "text" &&
+					(typeof item.text !== "string" ||
+						(item.font_size !== undefined &&
+							typeof item.font_size !== "number"))
+				)
+					throw new Error("Invalid canvas text.");
+				if (
+					item.type === "chart" &&
+					(!Array.isArray(item.labels) ||
+						item.labels.some((v) => typeof v !== "string") ||
+						!Array.isArray(item.values) ||
+						item.values.some((v) => typeof v !== "number"))
+				)
+					throw new Error("Invalid chart data.");
+			}
+			continue;
+		}
 		if (
 			!object(scene) ||
 			typeof scene.type !== "string" ||
@@ -529,7 +528,15 @@ $("file").onchange = async () => {
 		if (!file) return;
 		if (file.size > 128 * 1024)
 			throw new Error("JSON files must be smaller than 128 KB.");
-		importProject(JSON.parse(await file.text()));
+		const value = JSON.parse(await file.text());
+		checkImport(value);
+		const { spec } = await request("/api/validate", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(value),
+		});
+		importProject(spec);
+		announce("Project imported. Scene 1 selected.");
 	} catch (error) {
 		notice(error.message);
 	} finally {
@@ -563,7 +570,7 @@ async function showArtifacts(job) {
 			video.controls = true;
 			video.preload = "metadata";
 			video.src = url;
-			video.setAttribute("aria-label", "Rendered project");
+			video.setAttribute("aria-label", "Rendered project, silent video");
 			$("artifacts").append(video);
 		}
 		const link = element(
@@ -574,6 +581,7 @@ async function showArtifacts(job) {
 		link.href = url;
 		link.download = `frame-project.${extension}`;
 		$("artifacts").append(link);
+		enterInterface(link, { distance: 4 });
 	}
 }
 async function followJob() {
@@ -587,12 +595,14 @@ async function followJob() {
 		}
 		rendering = false;
 		$("render").disabled = false;
-		$("render").textContent = "Render project ↗";
+		$("render").textContent = renderLabel();
+		$("output-format").disabled = false;
 		if (job.state === "complete") await showArtifacts(job);
 	} catch (error) {
 		rendering = false;
 		$("render").disabled = false;
-		$("render").textContent = "Render project ↗";
+		$("render").textContent = renderLabel();
+		$("output-format").disabled = false;
 		notice(error.message);
 	}
 }
@@ -603,10 +613,11 @@ $("render").onclick = async () => {
 		await request("/api/render", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(project),
+			body: JSON.stringify({ spec: project, format: $("output-format").value }),
 		});
 		rendering = true;
 		$("render").disabled = true;
+		$("output-format").disabled = true;
 		$("render").textContent = "Rendering…";
 		$("artifacts").replaceChildren();
 		$("render-status").textContent =
@@ -616,19 +627,19 @@ $("render").onclick = async () => {
 		notice(error.message);
 	}
 };
-$("scene-form").onsubmit = (event) => event.preventDefault();
 try {
 	const saved = localStorage.getItem("frame-project-v1");
-	if (saved) importProject(JSON.parse(saved));
+	if (saved) {
+		checkImport(JSON.parse(saved));
+		project = JSON.parse(saved);
+		$("project-title").value = project.meta?.title || "Untitled project";
+	}
 } catch {
 	notice(
 		"Your saved project could not be restored. Import an exported JSON file to recover it.",
 	);
 }
-drawScenes();
-drawCanvas();
-drawEditor();
-drawMeta();
+
 fetch("/api/bootstrap")
 	.then((response) => {
 		if (!response.ok) throw new Error("Could not connect to Studio.");
@@ -636,6 +647,7 @@ fetch("/api/bootstrap")
 	})
 	.then((data) => {
 		token = data.token;
+
 		return data;
 	})
 	.then(({ job }) => {

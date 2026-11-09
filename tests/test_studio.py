@@ -36,6 +36,26 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn("narration", result["timeline"][0])
         self.assertIn("narration", spec["timeline"][0])
 
+    def test_converted_bullet_notes_keep_all_narration(self):
+        spec = {
+            "meta": {"title": "Notes"},
+            "timeline": [
+                {
+                    "type": "composition",
+                    "duration": 4,
+                    "elements": [],
+                    "narration": "a" * 700 + "\n" + "b" * 700,
+                }
+            ],
+        }
+        self.assertEqual(
+            validate_spec(spec)["timeline"][0]["narration"],
+            spec["timeline"][0]["narration"],
+        )
+        spec["timeline"][0]["narration"] = "x" * 7206
+        with self.assertRaises(SpecError):
+            validate_spec(spec)
+
     def test_bad_specs_rejected(self):
         invalid = [
             {"timeline": []},
@@ -139,7 +159,7 @@ class ApiTests(unittest.TestCase):
                 status, _ = self.request(
                     "/api/render",
                     "POST",
-                    spec,
+                    {"spec": spec, "format": "video"},
                     {
                         "Content-Type": "application/json",
                         "X-Studio-Token": self.server.token,
@@ -147,6 +167,68 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 400)
             start.assert_not_called()
+
+    def test_validation_and_export_format_wiring(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Studio-Token": self.server.token,
+        }
+        status, body = self.request("/api/validate", "POST", BASE, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["spec"]["timeline"][0]["text"], "Hello")
+        with patch.object(
+            self.jobs, "start", return_value={"state": "rendering"}
+        ) as start:
+            status, _ = self.request(
+                "/api/render", "POST", {"spec": BASE, "format": "pptx"}, headers
+            )
+            self.assertEqual(status, 202)
+            self.assertEqual(start.call_args.args[1], "pptx")
+        with self.assertRaises(SpecError):
+            self.jobs.start(BASE, "shell")
+
+    def test_hosted_generation_removed_and_browser_assets_confined(self):
+        headers = {
+            "X-Studio-Token": self.server.token,
+            "Content-Type": "application/json",
+        }
+        self.assertEqual(
+            self.request(
+                "/api/generate",
+                "POST",
+                {"brief": "Private brief", "consent": True},
+                headers,
+            )[0],
+            404,
+        )
+        for path in (
+            "/ai-assets/../app.js",
+            "/ai-assets/smollm2.gguf/../../app.js",
+            "/ai-assets/unlisted.js",
+        ):
+            self.assertEqual(self.request(path)[0], 404)
+        status, body = self.request("/ai-worker.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"loadModelFromUrl", body)
+        self.assertNotIn(
+            "generation_enabled", json.loads(self.request("/api/bootstrap")[1])
+        )
+
+    def test_pptx_only_does_not_require_or_offer_video(self):
+        directory = Path(self.jobs.storage.name) / "deck"
+        directory.mkdir()
+        with zipfile.ZipFile(directory / "video.pptx", "w") as archive:
+            archive.writestr("ppt/presentation.xml", "<presentation/>")
+
+        class Process:
+            def wait(self, timeout=None):
+                return 0
+
+        with patch("src.studio.subprocess.Popen", return_value=Process()) as launch:
+            self.jobs._render("a" * 32, directory, "pptx")
+            self.assertIn("--pptx-only", launch.call_args.args[0])
+        self.assertEqual(self.jobs.snapshot()["artifacts"], ["pptx"])
+        self.assertFalse((directory / "video.mp4").exists())
 
     def test_traversal_cannot_read_files(self):
         for path in ("/../README.md", "/api/artifact/../../README.md", "/.env"):

@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import importlib
 import json
 import math
 import os
@@ -55,8 +56,18 @@ def validate_spec(value):
     text(meta.get("title", ""), "Project title", 100)
     if meta.get("fps", 30) not in (24, 30):
         raise SpecError("Frame rate: choose 24 or 30 fps.")
-    if "resolution" in meta and meta["resolution"] != {"width": 1920, "height": 1080}:
-        raise SpecError("Resolution: Studio supports 1920 × 1080 only.")
+    composition = importlib.import_module(
+        "src.composition" if __package__ else "composition"
+    )
+    resolution = meta.get("resolution", {"width": 1920, "height": 1080})
+    object_fields(resolution, ("width", "height"), "Resolution")
+    if any(type(resolution.get(key)) is not int for key in ("width", "height")):
+        raise SpecError("Resolution dimensions must be whole numbers.")
+    if (
+        resolution.get("width"),
+        resolution.get("height"),
+    ) not in composition.RESOLUTIONS:
+        raise SpecError("Choose a supported landscape, portrait or square resolution.")
     theme = spec.setdefault("theme", {})
     object_fields(
         theme, ("preset", "bg", "fg", "accent", "font_size", "title_font_size"), "Theme"
@@ -88,6 +99,7 @@ def validate_spec(value):
         "outro": ("text",),
         "bullets": ("heading", "items", "stagger", "narration_per_bullet"),
         "chart": ("heading", "chart_type", "labels", "values", "y_label", "pptx_chart"),
+        "composition": ("name", "elements", "background"),
     }
     for index, scene in enumerate(scenes, 1):
         where = f"Scene {index}"
@@ -100,10 +112,17 @@ def validate_spec(value):
                 f"{where}: choose title, bullets, chart or outro. Image scenes are CLI-only."
             )
         kind = scene["type"]
+        if kind == "composition":
+            try:
+                composition.validate_composition(scene, text, number, object_fields)
+            except ValueError as error:
+                raise SpecError(f"{where}: {error}") from error
         object_fields(scene, common + fields[kind], where)
         for key in ("text", "subtitle", "heading", "y_label", "narration"):
             if key in scene:
-                text(scene[key], f"{where} {key}", 1200 if key == "narration" else 300)
+                text(scene[key], f"{where} {key}", (7205 if kind == "composition" else 1200) if key == "narration" else 300)
+                if key != "narration":
+                    composition.check_glyphs(scene[key], f"{where} {key}")
         if kind in ("title", "outro") and not scene.get("text", "").strip():
             raise SpecError(f"{where}: add some text.")
         if scene.get("anim", "fade") not in ("fade", "slide-up", "zoom-in"):
@@ -116,6 +135,7 @@ def validate_spec(value):
                 raise SpecError(f"{where}: add between 1 and 6 bullets.")
             for item in items:
                 text(item, f"{where} bullet", 180)
+                composition.check_glyphs(item, f"{where} bullet")
                 if not item.strip():
                     raise SpecError(f"{where}: bullets cannot be empty.")
             number(scene.get("stagger", 0.4), f"{where} stagger", 0, 2)
@@ -140,6 +160,7 @@ def validate_spec(value):
                 )
             for label in labels:
                 text(label, f"{where} label", 40)
+                composition.check_glyphs(label, f"{where} label")
             for item in values:
                 number(item, f"{where} chart value", -1000000, 1000000)
             scene.setdefault("chart_type", "bar")
@@ -183,7 +204,9 @@ class RenderJobs:
         with self.lock:
             return copy.deepcopy(self.job)
 
-    def start(self, spec):
+    def start(self, spec, output_format="video"):
+        if output_format not in ("video", "pptx"):
+            raise SpecError("Export format: choose video or pptx.")
         with self.lock:
             if self.closed or (self.job and self.job["state"] == "rendering"):
                 raise RuntimeError(
@@ -205,7 +228,9 @@ class RenderJobs:
                 "artifacts": [],
             }
             threading.Thread(
-                target=self._render, args=(job_id, directory), daemon=True
+                target=self._render,
+                args=(job_id, directory, output_format),
+                daemon=True,
             ).start()
             return copy.deepcopy(self.job)
 
@@ -216,7 +241,7 @@ class RenderJobs:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
 
-    def _render(self, job_id, directory):
+    def _render(self, job_id, directory, output_format="video"):
         # Explicit allowlist: no inherited API keys, Python injection or cloud credentials.
         environment = {
             key: os.environ[key]
@@ -233,16 +258,19 @@ class RenderJobs:
             with self.lock:
                 if self.closed:
                     return
+                command = [
+                    sys.executable,
+                    str(ROOT / "src/render.py"),
+                    str(directory / "spec.json"),
+                    "-o",
+                    str(directory / "video.mp4"),
+                    "--workdir",
+                    str(directory / "cache"),
+                ]
+                if output_format == "pptx":
+                    command.append("--pptx-only")
                 process = subprocess.Popen(
-                    [
-                        sys.executable,
-                        str(ROOT / "src/render.py"),
-                        str(directory / "spec.json"),
-                        "-o",
-                        str(directory / "video.mp4"),
-                        "--workdir",
-                        str(directory / "cache"),
-                    ],
+                    command,
                     cwd=directory,
                     env=environment,
                     stdout=subprocess.DEVNULL,
@@ -260,9 +288,10 @@ class RenderJobs:
             if returncode != 0:
                 raise RuntimeError(message)
             mp4 = directory / "video.mp4"
-            if not mp4.is_file() or not 0 < mp4.stat().st_size <= MAX_ARTIFACT:
-                raise RuntimeError("The renderer did not produce a usable video.")
-            artifacts.append("mp4")
+            if output_format == "video":
+                if not mp4.is_file() or not 0 < mp4.stat().st_size <= MAX_ARTIFACT:
+                    raise RuntimeError("The renderer did not produce a usable video.")
+                artifacts.append("mp4")
             pptx = directory / "video.pptx"
             if (
                 pptx.is_file()
@@ -272,12 +301,19 @@ class RenderJobs:
                 with zipfile.ZipFile(pptx) as archive:
                     if "ppt/presentation.xml" in archive.namelist():
                         artifacts.append("pptx")
+            if output_format == "pptx" and "pptx" not in artifacts:
+                raise RuntimeError(
+                    "PowerPoint export failed. No usable deck was produced."
+                )
             state = "complete"
-            message = (
-                "Video and PowerPoint are ready."
-                if "pptx" in artifacts
-                else "Video ready. PowerPoint export failed; only the video is available."
-            )
+            if output_format == "pptx":
+                message = "PowerPoint is ready. No video was rendered."
+            else:
+                message = (
+                    "Video and PowerPoint are ready."
+                    if "pptx" in artifacts
+                    else "Video ready. PowerPoint export failed; only the video is available."
+                )
         except (OSError, RuntimeError, zipfile.BadZipFile) as error:
             message = str(error)
         finally:
@@ -344,7 +380,7 @@ class StudioHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
         self.end_headers()
         if self.command != "HEAD":
@@ -377,7 +413,12 @@ class StudioHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/bootstrap":
             self.reply(
-                200, {"token": self.studio.token, "job": self.studio.jobs.snapshot()}
+                200,
+                {
+                    "token": self.studio.token,
+                    "job": self.studio.jobs.snapshot(),
+
+                },
             )
         elif self.path == "/api/job":
             self.reply(200, {"job": self.studio.jobs.snapshot()})
@@ -402,8 +443,44 @@ class StudioHandler(BaseHTTPRequestHandler):
             files = {
                 "/": ("index.html", "text/html; charset=utf-8"),
                 "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                "/selection-motion.js": ("selection-motion.js", "text/javascript; charset=utf-8"),
+                "/ai-worker.js": ("ai-worker.js", "text/javascript; charset=utf-8"),
+                "/ai-protocol.mjs": ("ai-protocol.mjs", "text/javascript; charset=utf-8"),
+                "/authoring.js": ("authoring.js", "text/javascript; charset=utf-8"),
+                "/scene-menus.js": ("scene-menus.js", "text/javascript; charset=utf-8"),
+                "/canvas.js": ("canvas.js", "text/javascript; charset=utf-8"),
+                "/thumbnails.js": ("thumbnails.js", "text/javascript; charset=utf-8"),
+                "/interactions.js": (
+                    "interactions.js",
+                    "text/javascript; charset=utf-8",
+                ),
                 "/style.css": ("style.css", "text/css; charset=utf-8"),
             }
+            assets = {
+                '/ai-assets/wllama.js': 'text/javascript',
+                '/ai-assets/wllama.wasm': 'application/wasm',
+                '/ai-assets/smollm2.gguf': 'application/octet-stream',
+            }
+            if self.path in assets:
+                path = WEB / self.path.lstrip("/")
+                # WEB already denotes studio; strip only the leading slash.
+                if not path.is_file():
+                    self.reply(404, {"error": "Run python scripts/setup_browser_ai.py first."})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", assets[self.path])
+                self.send_header("Content-Length", str(path.stat().st_size))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if self.command != "HEAD":
+                    try:
+                        with path.open("rb") as source:
+                            while chunk := source.read(1024 * 1024):
+                                self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass  # Worker termination cancels asset loading.
+                return
             if self.path in files:
                 name, mime = files[self.path]
                 self.reply(200, (WEB / name).read_bytes(), mime)
@@ -414,7 +491,7 @@ class StudioHandler(BaseHTTPRequestHandler):
         if not self.allowed(True):
             self.reply(403, {"error": "This request is not from the local Studio."})
             return
-        if self.path != "/api/render":
+        if self.path not in ("/api/render", "/api/validate"):
             self.reply(404, {"error": "Not found."})
             return
         try:
@@ -423,8 +500,14 @@ class StudioHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= MAX_BODY:
                 raise SpecError("Project must be smaller than 128 KB.")
-            spec = validate_spec(json.loads(self.rfile.read(length)))
-            self.reply(202, self.studio.jobs.start(spec))
+            payload = json.loads(self.rfile.read(length))
+            if self.path == "/api/validate":
+                self.reply(200, {"spec": validate_spec(payload)})
+            else:
+                if not isinstance(payload, dict) or set(payload) != {"spec", "format"}:
+                    raise SpecError("Provide a project and export format.")
+                spec = validate_spec(payload["spec"])
+                self.reply(202, self.studio.jobs.start(spec, payload["format"]))
         except (ValueError, UnicodeDecodeError) as error:
             self.reply(400, {"error": str(error)})
         except RuntimeError as error:

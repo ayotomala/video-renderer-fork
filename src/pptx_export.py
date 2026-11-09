@@ -5,9 +5,8 @@ Built from the individual artifacts (spec, narration clips, chart PNGs,
 generated scene images) — never from the rendered video. Chart scenes become
 native, editable PowerPoint charts; the chart PNG is the fallback.
 """
-import json
+
 import wave
-from pathlib import Path
 
 from lxml import etree
 from pptx import Presentation
@@ -34,12 +33,12 @@ _AUTOPLAY_SEQ = (
     ' fill="hold" nodeType="afterEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst>'
     '<p:cmd type="call" cmd="playFrom(0.0)"><p:cBhvr>'
     '<p:cTn id="6" dur="{dur}" fill="hold"/><p:tgtEl><p:spTgt spid="{spid}"/></p:tgtEl>'
-    '</p:cBhvr></p:cmd>'
-    '</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>'
-    '</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn>'
+    "</p:cBhvr></p:cmd>"
+    "</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>"
+    "</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn>"
     '<p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>'
     '<p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>'
-    '</p:seq>'
+    "</p:seq>"
 )
 
 
@@ -51,8 +50,9 @@ def _wav_ms(path: str) -> int:
 def _autoplay(slide, media_shape, audio_path: str):
     """Start the slide's narration when the slide opens."""
     root = slide._element.find(qn("p:timing")).find(".//" + qn("p:childTnLst"))
-    seq = etree.fromstring(_AUTOPLAY_SEQ.format(dur=_wav_ms(audio_path),
-                                                spid=media_shape.shape_id))
+    seq = etree.fromstring(
+        _AUTOPLAY_SEQ.format(dur=_wav_ms(audio_path), spid=media_shape.shape_id)
+    )
     root.insert(0, seq)
     # Keep cTn ids unique: the media node python-pptx created follows the sequence.
     for i, ctn in enumerate(root.iter(qn("p:cTn")), start=2):
@@ -207,17 +207,48 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                    "accent": theme.get("accent", "#58a6ff")}
 
     prs = Presentation()
+    resolution = spec.get("meta", {}).get("resolution", {"width": 1920, "height": 1080})
     prs.slide_width = SLIDE_W
-    prs.slide_height = SLIDE_H
+    prs.slide_height = Emu(round(SLIDE_W * resolution["height"] / resolution["width"]))
     blank = prs.slide_layouts[6]
 
     for scene, art in zip(spec["timeline"], scene_artifacts):
         slide = prs.slides.add_slide(blank)
 
+        if scene["type"] == "composition":
+            import composition
+
+            if art.get("composition_background"):
+                slide.shapes.add_picture(
+                    art["composition_background"],
+                    0,
+                    0,
+                    width=prs.slide_width,
+                    height=prs.slide_height,
+                )
+            composition.export_slide(slide, scene, prs.slide_width, prs.slide_height)
+            if scene.get("narration"):
+                notes = slide.notes_slide.notes_text_frame
+                if notes is not None:
+                    notes.text = scene["narration"]
+            if art.get("narration_path"):
+                media = slide.shapes.add_movie(
+                    art["narration_path"],
+                    left=prs.slide_width - Inches(0.8),
+                    top=prs.slide_height - Inches(0.8),
+                    width=Inches(0.6),
+                    height=Inches(0.6),
+                    mime_type="audio/wav",
+                )
+                _autoplay(slide, media, art["narration_path"])
+            continue
+
+        # Legacy layout retains its original aspect ratio on a resized slide.
         # background fill (or faded image background)
         if art.get("bg_image_png"):
-            slide.shapes.add_picture(art["bg_image_png"], 0, 0,
-                                     width=SLIDE_W, height=SLIDE_H)
+            slide.shapes.add_picture(
+                art["bg_image_png"], 0, 0, width=SLIDE_W, height=SLIDE_H
+            )
             scrim = art.get("scrim", 0.5)
             box = slide.shapes.add_shape(1, 0, 0, SLIDE_W, SLIDE_H)  # rectangle
             box.fill.solid()
@@ -232,8 +263,9 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
 
         stype = scene["type"]
         if stype in ("title", "outro"):
-            tb = slide.shapes.add_textbox(Inches(1), Inches(2.6),
-                                          SLIDE_W - Inches(2), Inches(1.5))
+            tb = slide.shapes.add_textbox(
+                Inches(1), Inches(2.6), SLIDE_W - Inches(2), Inches(1.5)
+            )
             tf = tb.text_frame
             p = tf.paragraphs[0]
             p.alignment = PP_ALIGN.CENTER
@@ -262,8 +294,9 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                 hr.font.size = Pt(28)
                 hr.font.bold = True
                 hr.font.color.rgb = accent
-            bb = slide.shapes.add_textbox(tx, Inches(1.9), text_w,
-                                          SLIDE_H - Inches(2.6))
+            bb = slide.shapes.add_textbox(
+                tx, Inches(1.9), text_w, SLIDE_H - Inches(2.6)
+            )
             btf = bb.text_frame
             for i, item in enumerate(scene.get("items", [])):
                 p = btf.paragraphs[0] if i == 0 else btf.add_paragraph()
@@ -276,17 +309,21 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
             if has_panel:
                 slide.shapes.add_picture(
                     art["image_png"],
-                    left=SLIDE_W - Inches(5.4), top=Inches(1.2),
-                    width=Inches(4.8), height=Inches(4.8))
+                    left=SLIDE_W - Inches(5.4),
+                    top=Inches(1.2),
+                    width=Inches(4.8),
+                    height=Inches(4.8),
+                )
         elif stype == "chart":
             _add_chart_scene(slide, scene, art, chart_theme)
         elif stype == "image" and art.get("image_png"):
-            slide.shapes.add_picture(art["image_png"], 0, 0,
-                                     width=SLIDE_W, height=SLIDE_H)
+            slide.shapes.add_picture(
+                art["image_png"], 0, 0, width=SLIDE_W, height=SLIDE_H
+            )
             if scene.get("caption"):
                 cb = slide.shapes.add_textbox(
-                    Inches(1), SLIDE_H - Inches(1.1),
-                    SLIDE_W - Inches(2), Inches(0.7))
+                    Inches(1), SLIDE_H - Inches(1.1), SLIDE_W - Inches(2), Inches(0.7)
+                )
                 cp = cb.text_frame.paragraphs[0]
                 cp.alignment = PP_ALIGN.CENTER
                 cr = cp.add_run()
@@ -298,11 +335,31 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
         if art.get("narration_path"):
             media = slide.shapes.add_movie(
                 art["narration_path"],
-                left=SLIDE_W - Inches(1.05), top=SLIDE_H - Inches(1.05),
-                width=Inches(0.8), height=Inches(0.8),
-                poster_frame_image=None, mime_type="audio/wav"
+                left=SLIDE_W - Inches(1.05),
+                top=SLIDE_H - Inches(1.05),
+                width=Inches(0.8),
+                height=Inches(0.8),
+                poster_frame_image=None,
+                mime_type="audio/wav",
             )
             _autoplay(slide, media, art["narration_path"])
+
+        if (prs.slide_width, prs.slide_height) != (SLIDE_W, SLIDE_H):
+            scale = min(prs.slide_width / SLIDE_W, prs.slide_height / SLIDE_H)
+            dx, dy = (
+                (prs.slide_width - SLIDE_W * scale) / 2,
+                (prs.slide_height - SLIDE_H * scale) / 2,
+            )
+            for shape in slide.shapes:
+                shape.left = Emu(round(dx + shape.left * scale))
+                shape.top = Emu(round(dy + shape.top * scale))
+                shape.width = Emu(round(shape.width * scale))
+                shape.height = Emu(round(shape.height * scale))
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            if run.font.size is not None:
+                                run.font.size = Emu(round(run.font.size * scale))
 
     prs.save(output_path)
     return output_path
