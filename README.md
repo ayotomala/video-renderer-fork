@@ -52,22 +52,86 @@ computer running Studio. Browser-saved projects are separate for each address.
 Use `--port 8766` if that port is occupied. Studio is local-only, not a
 production server or a hosted collaboration service.
 
+- **Editor / Create** navigation switches between the canvas and a dedicated
+  storyboard-generation page without overlays. Browser Back/Forward work;
+  navigation preserves the current project. Create offers explainer,
+  product-pitch and project-update prompt examples. A small 360M-parameter AI
+  runs on the browser CPU to write
+  validated JSON from your title, description (20–3000 characters) and optional
+  key points. Review the JSON, then explicitly
+  approve replacing the project; edits invalidate stale previews.
+- **Canvas-first editing:** add text, native charts and rectangle/ellipse shapes,
+  drag to place, use arrow keys to nudge (Shift for larger steps), and select
+  an element, then right-click for colour, text size in export pixels, alignment and
+  layer controls. Shift+F10 / the context-menu key and the element's options
+  button provide keyboard/touch access; no persistent selected-element bar. Double-click/Enter edits text **in place** on the canvas; no popup.
+  Resize with the eight corner/edge handles (arrow keys resize a focused handle).
+  Backspace/Delete removes a focused element, never text being typed. Text size
+  is committed as a validated pixel value, not a percentage slider.
+  Click away or Control/Command+Enter commits, Escape restores the original.
+  Text drafts are browser-saved; unsupported export glyphs are reported after
+  editing. The Chart button opens its data/style editor immediately. Styles include column,
+  horizontal bar, line, area, pie and doughnut; these export as native editable
+  PowerPoint charts. Shape options include rectangle, ellipse, rounded card,
+  triangle and arrow for callouts, process flows and emphasis.
+  Chart labels, values and style edit directly on the chart: **Done**
+  validates/saves the complete draft; **Escape** cancels. Narration alone uses
+  an inline notes panel. Pending
+  validation cannot overwrite newer edits or a different scene. No right-hand
+  inspector or oversized project header. The editor fits the viewport; scenes
+  scroll within the storyboard, while **Scene style** opens background/timing
+  controls on demand. Dropdowns follow the interface theme (custom native pickers
+  where supported). Imported legacy per-bullet notes are retained as combined
+  composition notes, up to 7,205 characters.
+- Scene templates: blank, title, quote, data story, comparison and closing.
+  Chart template values are examples, not factual claims. Legacy title/bullet/
+  chart/outro scenes automatically become editable canvas objects when opened,
+  retaining duration and narration. Bullets are individually editable. Animation/reveal timing
+  may change; export a JSON backup before converting.
+- Select solid, gradient, grid, orbit or wave backgrounds, with still/drift/pulse
+  motion. Preview is a user-triggered five-second approximation with Stop and
+  reduced-motion handling; video backgrounds animate, while PPTX uses time zero.
 - Edit title, bullet, chart and outro scenes; add, delete and reorder them.
+  Drag scenes to reorder; Alt+arrows provide keyboard reordering. Backspace/Delete
+  removes a focused scene, retaining at least one. The compact + in the storyboard
+  header opens a scene-type chooser. Right-click a scene, use its ••• button or
+  Shift+F10 for Edit on Canvas / Delete; the last scene cannot be deleted.
+  Scene cards show miniature slide previews updated from the current content.
+  Arrow keys/Home/End select scenes. Changes are announced and
+  errors receive focus; page navigation and inline editing retain keyboard focus.
 - Choose scenes in the single storyboard list. The header's appearance button
   switches the interface between light and dark with a circular reveal; the
   preference is saved separately from video styling. Reduced-motion preferences
   and browsers without View Transitions use an immediate switch.
+- UI motion uses short, finite transitions for page/scene changes, added scenes
+  and elements, menus and generated results, plus hover/press/focus feedback.
+  Navigation and scene-selection highlights glide between choices; scene changes
+  crossfade the outgoing canvas without flashing the stage background.
+  Rapid interactions replace earlier entrances; typing/dragging take priority.
+  Reduced-motion preferences disable this movement, including changes while
+  animations are running. These UI effects do not change exported videos.
 - Change the video background/accent, import/export JSON, and restore the last
   project from this browser's local storage. Export JSON before replacing a
   project or clearing browser storage; imports replace the current project.
 - The canvas is an **approximate layout preview**, not a live MoviePy render.
   Long text may clip in the final video; inspect the rendered result. Line/pie
   charts are represented by a labelled data preview, not an exact chart.
+- Choose **Video + PowerPoint** or **PowerPoint only**. The latter reuses the
+  CLI's `--pptx-only` path: no MP4 generation or encoding. Download links are
+  offered only for successful output types.
 - Render an actual **silent MP4 and PPTX** with download links. Narration stays
   in authored/exported JSON but is removed from the render copy. Inherited
-  provider credentials are excluded; Studio makes no AI calls. Timing uses
+  provider credentials are excluded; rendering makes no AI calls. Timing uses
   explicit scene durations, unlike narration-driven CLI renders.
-- Up to 12 scenes, 60 seconds total, 1–15 seconds per scene, fixed 1080p,
+- Up to 12 scenes, 16 elements per canvas, 60 seconds total, 1–15 seconds per
+  scene. Resolutions: 1280×720, 1920×1080, 1080×1920, 720×1280, 1080×1080,
+  2560×1440, 3840×2160, 2160×3840 and 2160×2160. 4K uses more time/memory and
+  remains subject to the render deadline. Canvas preview fits the available space;
+  aspect ratio changes its shape, but higher resolution at the same aspect ratio
+  does not make the on-screen preview larger.
+  Canvas coordinates are normalised. Legacy MP4/PPTX layouts fit without distortion;
+  freeform scenes use the full selected aspect ratio. Existing 1080p CLI defaults
+  remain unchanged. Rendering uses
   24/30 fps. Image scenes/AI image blocks and unsupported fields are rejected;
   use the CLI for those features. The upstream sample includes an AI image
   block, so it is not directly importable into this bounded editor.
@@ -79,13 +143,66 @@ production server or a hosted collaboration service.
 UI typography uses the operating system's sans-serif font (including Apple's
 system font on macOS) without redistributing SF Compact. Final video rendering
 continues to use the CLI's DejaVu Sans. No web-font CDN or frontend build is
-needed. The existing CLI and AI integrations are unchanged.
+needed. Canvas text/shape/chart objects remain editable in PPTX; typography can
+vary with PowerPoint font substitution. Composition export uses DejaVu Sans;
+unsupported glyphs are rejected before rendering with their Unicode code points,
+rather than silently showing missing-character boxes. Full colour emoji and
+complex emoji sequences are not supported. UI icons are SVG, not emoji. FontTools
+is used for font coverage (included by Matplotlib's dependency set).
+The existing CLI and AI integrations remain available.
+
+### Browser-local AI storyboard drafting
+
+Before first use, download the pinned model and browser runtime:
+
+```bash
+python scripts/setup_browser_ai.py
+python src/studio.py
+```
+
+Setup needs internet access and roughly 400 MB of disk space. It verifies SHA-256
+model and SHA-512 package checksums without executing package installation scripts.
+Assets stay in `studio/ai-assets/` (ignored by Git); rerun setup after a fresh clone.
+Generation then works without internet. No API key, Ollama, GPU or AI server is
+required. This is the only generation method; the former hardcoded local templates,
+Mistral endpoint and `--enable-generation` option have been removed.
+
+Uses [SmolLM2-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct)
+(Apache-2.0; see `studio/SMOLLM2-LICENSE`), Q8_0 weights pinned to Unsloth revision
+`391ed11137586e383b1be0fab9acf01d282c2e11`, and
+[wllama 3.13.0](https://github.com/ngxson/wllama) (MIT). wllama runs single-threaded
+WebAssembly CPU inference in a worker; JSON-schema grammar constrains the output.
+The model, WASM and JavaScript load only from Studio's same-origin static server.
+The brief is not sent to a hosted AI service. Generated JSON goes to the local
+Python `/api/validate` endpoint before review; that endpoint makes no AI calls.
+
+In **Create**, fill a title, description and optional key points, then select
+**Generate storyboard JSON**. Initial loading transfers about 386 MB from the
+local server into browser storage. Loading progress and **Cancel generation**
+are available; editing the brief or leaving Create cancels pending work. Your
+project is unchanged until you review the JSON and confirm replacement.
+
+A current browser with WebAssembly, worker and browser-storage support is needed.
+Runtime memory exceeds model size; low-memory devices may fail, and weaker CPUs
+can be slow. This is not a guarantee of support on every machine. The generator now explains the input roles and silent-video requirements, assigns
+source key points to ordered slides, and constrains the opening/body/ending schema.
+It creates 4–8 slides within the 60-second limit, rather than allowing a three-slide
+placeholder. No-key-point briefs are divided using their source sentences. Slide
+headings retain assigned source topics when they fit the heading limit; otherwise
+  the model writes a concise heading. The AI writes the visible body text.
+This is structure enforcement, not a hardcoded content generator.
+
+The tiny model
+is intentionally less capable than larger models: use clear, concise English
+briefs, verify facts and rewrite weak drafts. Invalid/truncated output is rejected,
+not repaired or replaced by a template. No automatic retry or cloud fallback.
 
 Run the Studio checks:
 
 ```bash
 python -m unittest discover -s tests -v
-node --check studio/app.js
+for file in studio/*.js studio/*.mjs; do node --check "$file" || exit 1; done
+node --test tests/test_browser_ai.mjs
 ```
 
 ### GitHub Actions
