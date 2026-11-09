@@ -1,5 +1,5 @@
-moviepy>=2.0,<3
-matplotlib
-python-pptx
-pillow
 imageio-ffmpeg
+matplotlib
+moviepy
+pillow
+python-pptx
