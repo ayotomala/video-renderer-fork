@@ -259,48 +259,17 @@
     },
     "chart": {
       "properties": {
-        "type": {
-          "const": "chart"
-        },
-        "chart_type": {
-          "enum": [
-            "bar",
-            "line",
-            "pie"
-          ],
-          "default": "bar"
-        },
-        "heading": {
-          "type": "string"
-        },
-        "labels": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "number"
-          }
-        },
-        "y_label": {
-          "type": "string"
-        },
-        "narration": {
-          "type": "string"
-        },
-        "duration": {
-          "type": "number"
-        },
-        "padding": {
-          "type": "number",
-          "default": 1.0
-        },
-        "transition": {
-          "type": "string"
-        }
+        "type": { "const": "chart" },
+        "chart_type": { "enum": ["bar", "line", "pie"], "default": "bar" },
+        "heading": { "type": "string" },
+        "labels": { "type": "array", "items": { "type": "string" } },
+        "values": { "type": "array", "items": { "type": "number" } },
+        "y_label": { "type": "string" },
+        "pptx_chart": { "enum": ["native", "image"], "default": "native", "description": "PPTX export only: editable PowerPoint chart, or the matplotlib PNG used in the video" },
+        "narration": { "type": "string" },
+        "duration": { "type": "number" },
+        "padding": { "type": "number", "default": 1.0 },
+        "transition": { "type": "string" }
       },
       "required": [
         "type",

@@ -98,7 +98,7 @@ def validate_spec(value):
         "title": ("text", "subtitle"),
         "outro": ("text",),
         "bullets": ("heading", "items", "stagger", "narration_per_bullet"),
-        "chart": ("heading", "chart_type", "labels", "values", "y_label"),
+        "chart": ("heading", "chart_type", "labels", "values", "y_label", "pptx_chart"),
         "composition": ("name", "elements", "background"),
     }
     for index, scene in enumerate(scenes, 1):
@@ -166,6 +166,8 @@ def validate_spec(value):
             scene.setdefault("chart_type", "bar")
             if scene["chart_type"] not in ("bar", "line", "pie"):
                 raise SpecError(f"{where}: choose bar, line or pie.")
+            if scene.get("pptx_chart", "native") not in ("native", "image"):
+                raise SpecError(f"{where}: pptx_chart must be native or image.")
             if scene["chart_type"] == "pie" and (
                 any(v < 0 for v in values) or sum(values) <= 0
             ):
