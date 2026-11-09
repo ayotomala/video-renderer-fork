@@ -118,6 +118,11 @@ using the `MISTRAL_API_KEY` repo secret and uploads the MP4 as an artifact.
   embedded on their slides, chart PNGs, generated images). Open in
   PowerPoint, tweak, and export to video from there for a near-identical
   result.
+- **Editable PPTX charts**: chart scenes export as native PowerPoint charts
+  (bar, line, pie) themed to the spec, so you can edit the data in
+  PowerPoint. Set `"pptx_chart": "image"` on a chart scene to keep the
+  matplotlib PNG instead; unsupported or failing charts fall back to the
+  PNG with a warning. The video always uses the PNG.
 - **PPTX-only mode**: `python3 src/render.py spec.json -o output/deck.pptx --pptx-only`
   skips the video path entirely (no clips, segments, ffmpeg or MP4) and
   writes just the deck, still with narration, AI images and charts. With a

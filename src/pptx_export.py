@@ -2,7 +2,8 @@
 scene's narration WAV embedded on its slide.
 
 Built from the individual artifacts (spec, narration clips, chart PNGs,
-generated scene images) — never from the rendered video.
+generated scene images) — never from the rendered video. Chart scenes become
+native, editable PowerPoint charts; the chart PNG is the fallback.
 """
 import json
 import wave
@@ -10,7 +11,9 @@ from pathlib import Path
 
 from lxml import etree
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_MARKER_STYLE
 from pptx.enum.text import PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
@@ -61,6 +64,138 @@ def _rgb(hex_color: str) -> RGBColor:
     return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
+def _blend(fg: str, bg: str, alpha: float) -> RGBColor:
+    """`fg` drawn at `alpha` opacity over `bg`, for faint gridlines."""
+    f, b = _rgb(fg), _rgb(bg)
+    return RGBColor(*(round(f[i] * alpha + b[i] * (1 - alpha)) for i in range(3)))
+
+
+_NATIVE_CHART_TYPES = {
+    "bar": XL_CHART_TYPE.COLUMN_CLUSTERED,
+    "line": XL_CHART_TYPE.LINE_MARKERS,
+    "pie": XL_CHART_TYPE.PIE,
+}
+
+
+def _fill_chart_space(chart, hex_color: str):
+    """Solid chart-area fill. python-pptx has no API for it, and without one
+    PowerPoint draws a white chart area on the dark slide."""
+    sp_pr = etree.fromstring(
+        f'<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+        f' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        f'<a:solidFill><a:srgbClr val="{hex_color.lstrip("#").upper()}"/></a:solidFill>'
+        f'<a:ln><a:noFill/></a:ln></c:spPr>')
+    space = chart._chartSpace
+    old = space.find(qn("c:spPr"))
+    if old is not None:
+        space.remove(old)
+    space.find(qn("c:chart")).addnext(sp_pr)
+
+
+def _add_native_chart(slide, scene: dict, theme: dict, x, y, cx, cy):
+    """Editable PowerPoint chart from the scene's labels/values, themed like
+    the matplotlib PNG used in the video."""
+    kind = scene.get("chart_type", "bar")
+    if len(scene["labels"]) != len(scene["values"]):
+        raise ValueError("labels and values differ in length")
+    data = CategoryChartData()
+    data.categories = scene["labels"]
+    data.add_series(scene.get("y_label") or scene.get("heading") or "Value",
+                    scene["values"])
+    frame = slide.shapes.add_chart(_NATIVE_CHART_TYPES[kind], x, y, cx, cy, data)
+    try:
+        _style_chart(frame.chart, scene, theme)
+    except Exception:
+        # Don't leave a half-styled chart under the fallback PNG.
+        frame._element.getparent().remove(frame._element)
+        raise
+
+
+def _style_chart(chart, scene: dict, theme: dict):
+    kind = scene.get("chart_type", "bar")
+    bg, fg, accent = theme["bg"], theme["fg"], theme["accent"]
+    _fill_chart_space(chart, bg)
+    chart.font.color.rgb = _rgb(fg)
+    chart.font.size = Pt(16)
+    chart.has_legend = False
+
+    if scene.get("heading"):
+        chart.has_title = True
+        title = chart.chart_title.text_frame
+        title.text = scene["heading"]
+        title.paragraphs[0].runs[0].font.size = Pt(24)
+        title.paragraphs[0].runs[0].font.color.rgb = _rgb(fg)
+    else:
+        chart.has_title = False
+
+    plot = chart.plots[0]
+    series = plot.series[0]
+    if kind == "pie":
+        # Same colour cycle as the matplotlib pie in the video.
+        palette = [accent, fg, "#888888"]
+        for i, point in enumerate(series.points):
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = _rgb(palette[i % len(palette)])
+            point.format.line.color.rgb = _rgb(bg)
+        plot.has_data_labels = True
+        labels = plot.data_labels
+        labels.show_category_name = True
+        labels.show_percentage = True
+        labels.show_value = False
+        labels.number_format = "0%"
+        labels.number_format_is_linked = False
+        labels.position = XL_LABEL_POSITION.OUTSIDE_END
+        return
+
+    plot.vary_by_categories = False
+    if kind == "bar":
+        plot.gap_width = 80
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = _rgb(accent)
+    else:
+        series.smooth = False
+        series.format.line.color.rgb = _rgb(accent)
+        series.format.line.width = Pt(3.5)
+        series.marker.style = XL_MARKER_STYLE.CIRCLE
+        series.marker.size = 10
+        series.marker.format.fill.solid()
+        series.marker.format.fill.fore_color.rgb = _rgb(accent)
+        series.marker.format.line.color.rgb = _rgb(accent)
+
+    for axis in (chart.category_axis, chart.value_axis):
+        axis.format.line.color.rgb = _rgb(fg)
+        axis.tick_labels.font.color.rgb = _rgb(fg)
+        axis.tick_labels.font.size = Pt(16)
+    chart.value_axis.has_major_gridlines = True
+    chart.value_axis.major_gridlines.format.line.color.rgb = _blend(fg, bg, 0.25)
+    if scene.get("y_label"):
+        chart.value_axis.has_title = True
+        axis_title = chart.value_axis.axis_title.text_frame
+        axis_title.text = scene["y_label"]
+        axis_title.paragraphs[0].runs[0].font.size = Pt(16)
+        axis_title.paragraphs[0].runs[0].font.color.rgb = _rgb(fg)
+
+
+def _add_chart_scene(slide, scene: dict, art: dict, theme: dict):
+    """Native chart by default; the matplotlib PNG when the scene asks for
+    `"pptx_chart": "image"` or the native chart can't be built."""
+    x, y = Inches(0.8), Inches(0.8)
+    cx, cy = SLIDE_W - Inches(1.6), SLIDE_H - Inches(1.6)
+    mode = scene.get("pptx_chart", "native")
+    kind = scene.get("chart_type", "bar")
+    if mode == "native":
+        if kind not in _NATIVE_CHART_TYPES:
+            print(f"[warn] no native pptx chart for chart_type '{kind}'; using PNG")
+        else:
+            try:
+                _add_native_chart(slide, scene, theme, x, y, cx, cy)
+                return
+            except Exception as e:
+                print(f"[warn] native pptx chart failed ({e}); using PNG")
+    if art.get("chart_png"):
+        slide.shapes.add_picture(art["chart_png"], left=x, top=y, width=cx, height=cy)
+
+
 def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
     """scene_artifacts: per-scene dicts with optional keys
     narration_path, chart_png, image_png, bg_image_png, scrim (0-1)."""
@@ -68,6 +203,8 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
     bg = _rgb(theme.get("bg", "#0d1117"))
     fg = _rgb(theme.get("fg", "#f0f6fc"))
     accent = _rgb(theme.get("accent", "#58a6ff"))
+    chart_theme = {"bg": theme.get("bg", "#0d1117"), "fg": theme.get("fg", "#f0f6fc"),
+                   "accent": theme.get("accent", "#58a6ff")}
 
     prs = Presentation()
     prs.slide_width = SLIDE_W
@@ -142,12 +279,7 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                     left=SLIDE_W - Inches(5.4), top=Inches(1.2),
                     width=Inches(4.8), height=Inches(4.8))
         elif stype == "chart":
-            if art.get("chart_png"):
-                slide.shapes.add_picture(
-                    art["chart_png"],
-                    left=Inches(0.8), top=Inches(0.8),
-                    width=SLIDE_W - Inches(1.6),
-                    height=SLIDE_H - Inches(1.6))
+            _add_chart_scene(slide, scene, art, chart_theme)
         elif stype == "image" and art.get("image_png"):
             slide.shapes.add_picture(art["image_png"], 0, 0,
                                      width=SLIDE_W, height=SLIDE_H)
