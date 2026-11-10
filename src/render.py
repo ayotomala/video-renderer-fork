@@ -87,6 +87,12 @@ def synth_narration(scene: dict, workdir: Path, voice_cfg: dict) -> tuple[str | 
                 fmt=voice_cfg.get("format", "wav"),
             )
         paths.append(str(out))
+    if per_bullet:
+        # #6: when each bullet's clip starts in the joined track, from the
+        # decoded durations (same measure as the timeline), as a running sum.
+        durs = [tts.audio_duration(p) for p in paths]
+        scene["_bullet_starts"] = [sum(durs[:i]) for i in range(len(durs))]
+        print("[bullets] reveal at " + ", ".join(f"{t:.2f}s" for t in scene["_bullet_starts"]))
     if len(paths) == 1:
         return paths[0], tts.audio_duration(paths[0])
     combined = workdir / f"narr_combined_{hashlib.sha1(json.dumps(paths).encode()).hexdigest()[:10]}.{voice_cfg.get('format', 'wav')}"
@@ -279,16 +285,19 @@ def build_bullets(scene, theme, workdir=None):
     top, bottom = 0.30, 0.85
     step = (bottom - top) / max(n, 1)
     stagger = scene.get("stagger", 0.4)
+    starts = scene.get("_bullet_starts")  # narration_per_bullet clip starts (#6)
+    if not starts or len(starts) != n:
+        starts = None
     for i, item in enumerate(scene["items"]):
         bullet = _left_text_clip("• " + item, theme, b_size,
                                  max_w_px=int(W * max_w))
         y = int(H * (top + i * step))
         bullet = bullet.with_position((x, y))
-        if stagger > 0:
+        if starts or stagger > 0:
             if bullet.mask is None:
                 bullet = bullet.with_mask()
             bullet = bullet.with_mask(bullet.mask.with_effects([vfx.FadeIn(BULLET_FADE)]))
-            bullet = bullet.with_start(i * stagger)
+            bullet = bullet.with_start(starts[i] if starts else i * stagger)
         clips.append(bullet)
 
     return CompositeVideoClip(clips, size=(W, H))
@@ -418,11 +427,6 @@ def render(spec_path: str, output: str, workdir: str | None = None):
     for i, scene in enumerate(spec["timeline"]):
         stype = scene["type"]
         builder = BUILDERS[stype]
-        if stype in ("image", "chart", "title", "bullets"):
-            clip = builder(scene, theme, workdir)
-        else:
-            clip = builder(scene, theme)
-
         try:
             audio_path, audio_dur = synth_narration(scene, workdir, voice_cfg)
         except RuntimeError as e:
@@ -431,6 +435,11 @@ def render(spec_path: str, output: str, workdir: str | None = None):
                 audio_path, audio_dur = None, 0.0
             else:
                 raise
+
+        if stype in ("image", "chart", "title", "bullets"):
+            clip = builder(scene, theme, workdir)
+        else:
+            clip = builder(scene, theme)
 
         dur = scene_duration(scene, audio_dur)
         clip = clip.with_duration(dur)
