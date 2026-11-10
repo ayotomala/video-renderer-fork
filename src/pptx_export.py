@@ -210,6 +210,29 @@ def _add_chart_scene(slide, scene: dict, art: dict, theme: dict):
         slide.shapes.add_picture(art["chart_png"], left=x, top=y, width=cx, height=cy)
 
 
+def _notes_text(scene: dict, art: dict) -> str:
+    """Speaker notes for a scene's slide: its narration text, or "" if it has none.
+
+    narration_per_bullet becomes one numbered line per bullet. When the
+    narration audio is a WAV, its length is added so presenters know the pacing.
+    """
+    per_bullet = scene.get("narration_per_bullet")
+    if per_bullet:
+        lines = [f"{i + 1}. {text}" for i, text in enumerate(per_bullet)]
+    elif scene.get("narration"):
+        lines = [scene["narration"]]
+    else:
+        return ""
+    audio = art.get("narration_path")
+    if audio and str(audio).lower().endswith(".wav"):
+        try:
+            with wave.open(str(audio)) as w:
+                lines.append(f"(Narration: {w.getnframes() / w.getframerate():.1f}s)")
+        except (wave.Error, EOFError, OSError):
+            pass  # the length is a nicety; never fail the export over it
+    return "\n".join(lines)
+
+
 def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
     """scene_artifacts: per-scene dicts with optional keys
     narration_path, chart_png, image_png, bg_image_png, scrim (0-1)."""
@@ -374,6 +397,13 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                         for run in paragraph.runs:
                             if run.font.size is not None:
                                 run.font.size = Emu(round(run.font.size * scale))
+
+        # speaker notes: the narration text (#7). Added last, so the slide's own
+        # shapes, media and relationship ids are exactly as before; the notes
+        # page is only created when there is text.
+        notes = _notes_text(scene, art)
+        if notes:
+            slide.notes_slide.notes_text_frame.text = notes
 
     prs.save(output_path)
     return output_path
